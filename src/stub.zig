@@ -1,3 +1,36 @@
+const PrivateData = struct {
+    pub const out_block_size = 64 * 1024;
+
+    gpa: mem.Allocator,
+    compress: std.compress.xz.Decompress,
+    reader: Filter.Reader,
+    writer: std.Io.Writer,
+
+    pub fn init(handle: *c.archive_read_filter, gpa: mem.Allocator) !*PrivateData {
+        const buffer = try gpa.alloc(u8, out_block_size);
+        errdefer gpa.free(buffer);
+        const private_data = try gpa.create(PrivateData);
+        errdefer gpa.destroy(private_data);
+
+        private_data.* = .{
+            .gpa = gpa,
+            .writer = .fixed(buffer),
+            .reader = .init(.{ .handle = handle }),
+            .compress = undefined,
+        };
+        private_data.compress = try .init(&private_data.reader.interface, gpa, &.{});
+
+        return private_data;
+    }
+
+    pub fn deinit(self: *PrivateData) void {
+        const gpa = self.gpa;
+        self.compress.deinit();
+        gpa.free(self.writer.buffer);
+        gpa.destroy(self);
+    }
+};
+
 export fn archive_read_support_format_rar5(a: [*c]c.archive) c_int {
     _ = a;
     return c.ARCHIVE_FATAL;
@@ -20,22 +53,22 @@ fn xzBidderBid(
     filter: [*c]c.archive_read_filter,
 ) callconv(.c) c_int {
     _ = self;
-    var avail: isize = 0;
-    if (c.__archive_read_filter_ahead(filter, 6, &avail)) |ptr| {
-        if (avail != 6) return 0;
-        const buffer: [*]const u8 = @ptrCast(@alignCast(ptr));
-        // Verify Header Magic Bytes : FD 37 7A 58 5A 00
-        if (!mem.eql(u8, buffer[0..6], "\xFD\x37\x7A\x58\x5A\x00")) {
-            return 0;
-        }
-        return 48;
+    var f: Filter = .{ .handle = filter };
+    const data = f.read(6) catch return 0;
+    if (data.len < 6) return 0;
+    if (!mem.eql(u8, data[0..6], "\xFD\x37\x7A\x58\x5A\x00")) {
+        return 0;
     }
-    return 0;
+    return 48;
 }
 
 fn xzBidderInit(self: [*c]c.archive_read_filter) callconv(.c) c_int {
     self.*.code = c.ARCHIVE_FILTER_XZ;
     self.*.name = "xz";
+    self.*.vtable = &xz_read_vtable;
+    self.*.data = PrivateData.init(self, std.heap.c_allocator) catch {
+        return -1;
+    };
     return c.ARCHIVE_OK;
 }
 
@@ -45,13 +78,28 @@ const xz_bidder_vtable: c.archive_read_filter_bidder_vtable = .{
 };
 
 fn xzFilterRead(self: [*c]c.archive_read_filter, p: [*c]?*const anyopaque) callconv(.c) isize {
-    _ = self;
-    _ = p;
-    return 0;
+    var data: *PrivateData = @ptrCast(@alignCast(self.*.data));
+    var offset: usize = 0;
+    _ = data.writer.consumeAll();
+    offset += data.compress.reader.stream(&data.writer, .unlimited) catch |err| switch (err) {
+        error.WriteFailed, error.EndOfStream => 0,
+        else => |e| {
+            std.log.err("{t}", .{e});
+            return c.ARCHIVE_FAILED;
+        },
+    };
+    data.writer.flush() catch unreachable;
+    if (offset == 0) {
+        p.* = null;
+    } else {
+        p.* = data.writer.buffer.ptr;
+    }
+    return @intCast(offset);
 }
 
 fn xzFilterClose(self: [*c]c.archive_read_filter) callconv(.c) c_int {
-    _ = self;
+    var data: *PrivateData = @ptrCast(@alignCast(self.*.data));
+    data.deinit();
     return c.ARCHIVE_OK;
 }
 
@@ -99,4 +147,5 @@ comptime {
 
 const std = @import("std");
 const mem = std.mem;
+const Filter = @import("Filter.zig");
 const c = @import("c");

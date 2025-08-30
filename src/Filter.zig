@@ -9,36 +9,37 @@ pub fn read(self: Filter, min: usize) std.Io.Reader.Error![]u8 {
         return error.ReadFailed;
     } else {
         @branchHint(.likely);
-        var buffer: [*]u8 = @ptrCast(@alignCast(ptr));
-        return buffer[0..avail];
+        var buffer: [*]u8 = @ptrCast(@alignCast(@constCast(ptr)));
+        return buffer[0..@intCast(avail)];
     }
 }
 
-pub fn consume(self: Filter, request: i64) std.Io.Reader.Error!void {
-    const rc = c.__archive_read_filter_consume(self.handle, request);
+pub fn consume(self: Filter, request: usize) std.Io.Reader.Error!usize {
+    const rc = c.__archive_read_filter_consume(self.handle, @intCast(request));
     if (rc < 0) return error.ReadFailed;
+    return @intCast(rc);
 }
 
 pub const Reader = struct {
     filter: Filter,
     interface: std.Io.Reader,
 
-    pub fn initInterface(buffer: []u8) std.Io.Reader {
+    pub fn initInterface() std.Io.Reader {
         return .{
             .vtable = &.{
                 .stream = Reader.stream,
                 .discard = Reader.discard,
             },
-            .buffer = buffer,
+            .buffer = &.{},
             .seek = 0,
             .end = 0,
         };
     }
 
-    pub fn init(filter: Filter, buffer: []u8) Reader {
+    pub fn init(filter: Filter) Reader {
         return .{
             .filter = filter,
-            .interface = initInterface(buffer),
+            .interface = initInterface(),
         };
     }
 
@@ -48,14 +49,14 @@ pub const Reader = struct {
 
         const bytes_written = try w.write(limit.slice(data));
 
-        try r.filter.consume(bytes_written);
+        _ = try r.filter.consume(bytes_written);
 
         return bytes_written;
     }
 
     fn discard(io_reader: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
         const r: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
-        try r.filter.consume(@min(maxInt(i64), @intFromEnum(limit)));
+        return try r.filter.consume(@min(maxInt(i64), @intFromEnum(limit)));
     }
 };
 

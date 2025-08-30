@@ -6,7 +6,7 @@ const Writer = struct {
     a: *c.archive,
     interface: std.Io.Writer,
 
-    pub fn initArchive(a: *c.archive, buffer: []u8) Writer {
+    pub fn init(a: *c.archive, buffer: []u8) Writer {
         return .{
             .a = a,
             .interface = initInterface(buffer),
@@ -112,6 +112,6 @@ test {
     _ = c.archive_write_open_filename(a, "helloworld.pkg.tar.zst");
 
     var buf: [8 * 1024]u8 = undefined;
-    var archive_writer: Writer = .initArchive(a.?, &buf);
+    var archive_writer: Writer = .init(a.?, &buf);
     try addToArchive(pkg_dir, &archive_writer);
 }
